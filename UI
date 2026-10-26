@@ -1,1 +1,774 @@
+-- UI.lua | LuaU | Roblox Executor
+-- Full in-game ScreenGui menu matching Matcha UI tabs:
+-- Combat | Visuals | World | Character | Options | Configs
+-- Uses Drawing API for overlay panels + ScreenGui for interactive controls
 
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+local CoreGui          = game:GetService("CoreGui")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera      = Workspace.CurrentCamera
+
+-- Load modules (adjust paths to match your executor's loadstring/require setup)
+-- FILL: update these paths to wherever you placed the other scripts
+local AimbotCfg = loadstring(game:HttpGet("FILL_AIMBOT_URL"))()  -- or require/loadfile
+local EspCfg    = loadstring(game:HttpGet("FILL_ESP_URL"))()
+local WeponCfg  = loadstring(game:HttpGet("FILL_WEPON_URL"))()
+local Config    = loadstring(game:HttpGet("FILL_CONFIG_URL"))()
+
+-- ─── THEME ────────────────────────────────────────────────────────────────────
+local theme = {
+    bg          = Color3.fromRGB(22,  22,  27 ),
+    panel       = Color3.fromRGB(30,  30,  36 ),
+    border      = Color3.fromRGB(50,  50,  58 ),
+    accent      = Color3.fromRGB(181, 96,  96 ),
+    accent_dim  = Color3.fromRGB(120, 67,  68 ),
+    text        = Color3.fromRGB(140, 140, 150),
+    text_bright = Color3.fromRGB(200, 200, 210),
+    text_dim    = Color3.fromRGB(80,  80,  90 ),
+    check_on    = Color3.fromRGB(165, 93,  94 ),
+    green       = Color3.fromRGB(83,  153, 98 ),
+    yellow      = Color3.fromRGB(181, 150, 57 ),
+    red         = Color3.fromRGB(195, 75,  75 ),
+    tab_active  = Color3.fromRGB(40,  40,  48 ),
+    tab_idle    = Color3.fromRGB(0,   0,   0,  0),
+}
+
+-- ─── MENU STATE ───────────────────────────────────────────────────────────────
+local menu_open   = true
+local menu_key    = Enum.KeyCode.Insert
+local active_tab  = "Combat"
+local tabs        = { "Combat", "Visuals", "World", "Character", "Options", "Configs" }
+local tab_icons   = { "⚔", "👁", "🌍", "🏃", "⚙", "📁" }
+
+-- ─── GUI ROOT ─────────────────────────────────────────────────────────────────
+-- Remove existing instance to allow re-execution
+if CoreGui:FindFirstChild("MatchaUI") then
+    CoreGui.MatchaUI:Destroy()
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name            = "MatchaUI"
+ScreenGui.ResetOnSpawn    = false
+ScreenGui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
+ScreenGui.IgnoreGuiInset  = true
+ScreenGui.Parent          = CoreGui
+
+-- ─── UTIL ─────────────────────────────────────────────────────────────────────
+local function new(class, props, parent)
+    local inst = Instance.new(class)
+    for k, v in pairs(props) do
+        inst[k] = v
+    end
+    if parent then inst.Parent = parent end
+    return inst
+end
+
+local function tween(inst, props, t, style, dir)
+    TweenService:Create(inst,
+        TweenInfo.new(t or 0.12, style or Enum.EasingStyle.Quad, dir or Enum.EasingDirection.Out),
+        props):Play()
+end
+
+local function hover_button(btn, idle_color, hover_color)
+    btn.MouseEnter:Connect(function()  tween(btn, {BackgroundColor3 = hover_color}) end)
+    btn.MouseLeave:Connect(function()  tween(btn, {BackgroundColor3 = idle_color})  end)
+end
+
+-- ─── MAIN FRAME ───────────────────────────────────────────────────────────────
+local vp   = Camera.ViewportSize
+local W, H = 860, 560
+
+local Main = new("Frame", {
+    Name              = "Main",
+    Size              = UDim2.fromOffset(W, H),
+    Position          = UDim2.fromOffset((vp.X - W)/2, (vp.Y - H)/2),
+    BackgroundColor3  = theme.bg,
+    BorderSizePixel   = 0,
+    ClipsDescendants  = true,
+}, ScreenGui)
+
+new("UICorner", { CornerRadius = UDim.new(0, 8) }, Main)
+new("UIStroke", { Color = theme.border, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, Main)
+
+-- Drag support
+do
+    local dragging, drag_start, start_pos = false, nil, nil
+    Main.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging   = true
+            drag_start = input.Position
+            start_pos  = Main.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = input.Position - drag_start
+            Main.Position = UDim2.fromOffset(
+                start_pos.X.Offset + delta.X,
+                start_pos.Y.Offset + delta.Y)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+end
+
+-- ─── SIDEBAR ──────────────────────────────────────────────────────────────────
+local Sidebar = new("Frame", {
+    Size             = UDim2.new(0, 52, 1, 0),
+    BackgroundColor3 = Color3.fromRGB(18, 18, 22),
+    BorderSizePixel  = 0,
+}, Main)
+
+new("UIStroke", { Color = theme.border, Thickness = 1,
+    ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, Sidebar)
+
+local SideList = new("Frame", {
+    Size = UDim2.new(1, 0, 1, -12),
+    Position = UDim2.fromOffset(0, 6),
+    BackgroundTransparency = 1,
+}, Sidebar)
+new("UIListLayout", { Padding = UDim.new(0, 4), HorizontalAlignment = Enum.HorizontalAlignment.Center }, SideList)
+
+local tab_buttons = {}
+
+for i, tab_name in ipairs(tabs) do
+    local btn = new("TextButton", {
+        Size             = UDim2.new(0, 38, 0, 38),
+        BackgroundColor3 = theme.tab_idle,
+        BackgroundTransparency = 1,
+        Text             = tab_icons[i],
+        TextSize         = 18,
+        Font             = Enum.Font.GothamBold,
+        TextColor3       = theme.text,
+        BorderSizePixel  = 0,
+        AutoButtonColor  = false,
+    }, SideList)
+    new("UICorner", { CornerRadius = UDim.new(0, 6) }, btn)
+    new("UIStroke", { Color = Color3.fromRGB(0,0,0), Thickness = 0, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, btn)
+
+    tab_buttons[tab_name] = btn
+
+    btn.MouseButton1Click:Connect(function()
+        active_tab = tab_name
+        for tname, tbtn in pairs(tab_buttons) do
+            if tname == active_tab then
+                tween(tbtn, {BackgroundColor3 = theme.tab_active, BackgroundTransparency = 0, TextColor3 = theme.text_bright})
+            else
+                tween(tbtn, {BackgroundColor3 = Color3.fromRGB(0,0,0), BackgroundTransparency = 1, TextColor3 = theme.text})
+            end
+        end
+        update_content()
+    end)
+    hover_button(btn, theme.tab_idle, Color3.fromRGB(35,35,42))
+end
+
+-- ─── CONTENT AREA ─────────────────────────────────────────────────────────────
+local Content = new("Frame", {
+    Size            = UDim2.new(1, -52, 1, -32),
+    Position        = UDim2.new(0, 52, 0, 32),
+    BackgroundTransparency = 1,
+    ClipsDescendants = true,
+}, Main)
+
+-- Title bar
+local TitleBar = new("Frame", {
+    Size             = UDim2.new(1, 0, 0, 32),
+    BackgroundColor3 = Color3.fromRGB(18, 18, 22),
+    BorderSizePixel  = 0,
+}, Main)
+new("UIStroke", { Color = theme.border, Thickness = 1,
+    ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, TitleBar)
+
+new("TextLabel", {
+    Size = UDim2.fromOffset(120, 32),
+    BackgroundTransparency = 1,
+    Text = "matcha",
+    Font = Enum.Font.GothamBold,
+    TextSize = 14,
+    TextColor3 = theme.accent,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Position = UDim2.fromOffset(60, 0),
+}, TitleBar)
+
+-- Close button
+local close_btn = new("TextButton", {
+    Size = UDim2.fromOffset(18, 18),
+    Position = UDim2.new(1, -24, 0.5, -9),
+    BackgroundColor3 = Color3.fromRGB(195, 75, 75),
+    Text = "×",
+    Font = Enum.Font.GothamBold,
+    TextSize = 14,
+    TextColor3 = Color3.fromRGB(255,255,255),
+    BorderSizePixel = 0,
+    AutoButtonColor = false,
+}, TitleBar)
+new("UICorner", { CornerRadius = UDim.new(1, 0) }, close_btn)
+close_btn.MouseButton1Click:Connect(function()
+    menu_open = false
+    tween(Main, {Size = UDim2.fromOffset(W, 0), Position = UDim2.fromOffset(Main.Position.X.Offset, Main.Position.Y.Offset + H/2)}, 0.15)
+    task.delay(0.15, function() Main.Visible = false end)
+end)
+
+-- ─── WIDGET BUILDERS ──────────────────────────────────────────────────────────
+-- Each returns the Frame it created and (optionally) a set function
+
+local function make_panel(parent, title, pos_y, width)
+    local panel = new("Frame", {
+        Size             = UDim2.new(0, width or 380, 0, 32),
+        Position         = UDim2.fromOffset(0, pos_y),
+        BackgroundColor3 = theme.panel,
+        BorderSizePixel  = 0,
+        ClipsDescendants = true,
+        AutomaticSize    = Enum.AutomaticSize.Y,
+    }, parent)
+    new("UICorner", { CornerRadius = UDim.new(0, 6) }, panel)
+    new("UIStroke", { Color = theme.border, Thickness = 1,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, panel)
+
+    new("TextLabel", {
+        Size = UDim2.new(1, -16, 0, 28),
+        Position = UDim2.fromOffset(14, 0),
+        BackgroundTransparency = 1,
+        Text = title:upper(),
+        Font = Enum.Font.GothamBold,
+        TextSize = 11,
+        TextColor3 = theme.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, panel)
+
+    local divider = new("Frame", {
+        Size = UDim2.new(1, -20, 0, 1),
+        Position = UDim2.fromOffset(10, 28),
+        BackgroundColor3 = theme.border,
+        BorderSizePixel  = 0,
+    }, panel)
+
+    local body = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 0),
+        Position = UDim2.fromOffset(0, 30),
+        BackgroundTransparency = 1,
+        AutomaticSize = Enum.AutomaticSize.Y,
+    }, panel)
+    new("UIListLayout", { Padding = UDim.new(0, 0) }, body)
+    new("UIPadding", { PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14), PaddingBottom = UDim.new(0, 8) }, body)
+
+    return panel, body
+end
+
+local function make_checkbox(parent, label, value_ref, key, color)
+    color = color or theme.accent
+    local row = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 28),
+        BackgroundTransparency = 1,
+    }, parent)
+
+    local lbl = new("TextLabel", {
+        Size = UDim2.new(1, -28, 1, 0),
+        BackgroundTransparency = 1,
+        Text = label,
+        Font = Enum.Font.Gotham,
+        TextSize = 13,
+        TextColor3 = theme.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, row)
+
+    local box = new("TextButton", {
+        Size = UDim2.fromOffset(16, 16),
+        Position = UDim2.new(1, -16, 0.5, -8),
+        BackgroundColor3 = value_ref[key] and color or theme.border,
+        Text = "",
+        BorderSizePixel = 0,
+        AutoButtonColor = false,
+    }, row)
+    new("UICorner", { CornerRadius = UDim.new(0, 4) }, box)
+    new("UIStroke", { Color = theme.border, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, box)
+
+    local check = new("TextLabel", {
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Text = "✓",
+        Font = Enum.Font.GothamBold,
+        TextSize = 11,
+        TextColor3 = Color3.fromRGB(255,255,255),
+        Visible = value_ref[key],
+    }, box)
+
+    box.MouseButton1Click:Connect(function()
+        value_ref[key] = not value_ref[key]
+        local on = value_ref[key]
+        tween(box, { BackgroundColor3 = on and color or theme.border })
+        check.Visible = on
+        tween(lbl, { TextColor3 = on and theme.text_bright or theme.text })
+    end)
+
+    return row
+end
+
+local function make_slider(parent, label, value_ref, key, min, max, fmt)
+    fmt = fmt or "%.0f"
+    local row = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 44),
+        BackgroundTransparency = 1,
+    }, parent)
+
+    new("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 18),
+        BackgroundTransparency = 1,
+        Text = label,
+        Font = Enum.Font.Gotham,
+        TextSize = 13,
+        TextColor3 = theme.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, row)
+
+    local val_lbl = new("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 18),
+        Position = UDim2.fromOffset(0, 0),
+        BackgroundTransparency = 1,
+        Text = string.format(fmt, value_ref[key]),
+        Font = Enum.Font.Gotham,
+        TextSize = 12,
+        TextColor3 = theme.accent,
+        TextXAlignment = Enum.TextXAlignment.Right,
+    }, row)
+
+    local track = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 4),
+        Position = UDim2.fromOffset(0, 24),
+        BackgroundColor3 = theme.border,
+        BorderSizePixel  = 0,
+    }, row)
+    new("UICorner", { CornerRadius = UDim.new(1, 0) }, track)
+
+    local pct = math.clamp((value_ref[key] - min) / (max - min), 0, 1)
+    local fill = new("Frame", {
+        Size = UDim2.new(pct, 0, 1, 0),
+        BackgroundColor3 = theme.accent,
+        BorderSizePixel  = 0,
+    }, track)
+    new("UICorner", { CornerRadius = UDim.new(1, 0) }, fill)
+
+    local thumb = new("Frame", {
+        Size = UDim2.fromOffset(10, 10),
+        Position = UDim2.new(pct, -5, 0.5, -5),
+        BackgroundColor3 = Color3.fromRGB(255,255,255),
+        BorderSizePixel  = 0,
+    }, track)
+    new("UICorner", { CornerRadius = UDim.new(1, 0) }, thumb)
+
+    local dragging_slider = false
+    track.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging_slider = true
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging_slider = false
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(i)
+        if not dragging_slider then return end
+        if i.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+        local track_abs = track.AbsolutePosition
+        local track_sz  = track.AbsoluteSize
+        local rel = math.clamp((i.Position.X - track_abs.X) / track_sz.X, 0, 1)
+        local new_val = min + (max - min) * rel
+        if type(value_ref[key]) == "number" and math.floor(min) == min and math.floor(max) == max then
+            new_val = math.floor(new_val + 0.5)
+        end
+        value_ref[key]  = new_val
+        fill.Size        = UDim2.new(rel, 0, 1, 0)
+        thumb.Position   = UDim2.new(rel, -5, 0.5, -5)
+        val_lbl.Text     = string.format(fmt, new_val)
+    end)
+
+    return row
+end
+
+local function make_dropdown(parent, label, value_ref, key, options)
+    local row = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 44),
+        BackgroundTransparency = 1,
+        ClipsDescendants = false,
+        ZIndex = 10,
+    }, parent)
+
+    new("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 18),
+        BackgroundTransparency = 1,
+        Text = label,
+        Font = Enum.Font.Gotham,
+        TextSize = 13,
+        TextColor3 = theme.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 10,
+    }, row)
+
+    local selected = value_ref[key]
+    local drop_btn = new("TextButton", {
+        Size = UDim2.new(1, 0, 0, 22),
+        Position = UDim2.fromOffset(0, 20),
+        BackgroundColor3 = theme.panel,
+        Text = selected,
+        Font = Enum.Font.Gotham,
+        TextSize = 12,
+        TextColor3 = theme.text_bright,
+        BorderSizePixel = 0,
+        AutoButtonColor = false,
+        ZIndex = 10,
+    }, row)
+    new("UICorner", { CornerRadius = UDim.new(0, 4) }, drop_btn)
+    new("UIStroke", { Color = theme.border, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, drop_btn)
+
+    local dropdown = new("Frame", {
+        Size = UDim2.new(1, 0, 0, #options * 22),
+        Position = UDim2.fromOffset(0, 44),
+        BackgroundColor3 = Color3.fromRGB(28, 28, 34),
+        BorderSizePixel = 0,
+        Visible = false,
+        ZIndex = 20,
+    }, row)
+    new("UICorner", { CornerRadius = UDim.new(0, 4) }, dropdown)
+    new("UIStroke", { Color = theme.border, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, dropdown)
+    new("UIListLayout", {}, dropdown)
+
+    for _, opt in ipairs(options) do
+        local opt_btn = new("TextButton", {
+            Size = UDim2.new(1, 0, 0, 22),
+            BackgroundColor3 = Color3.fromRGB(28,28,34),
+            Text = opt,
+            Font = Enum.Font.Gotham,
+            TextSize = 12,
+            TextColor3 = theme.text,
+            BorderSizePixel = 0,
+            AutoButtonColor = false,
+            ZIndex = 20,
+        }, dropdown)
+        opt_btn.MouseButton1Click:Connect(function()
+            value_ref[key] = opt
+            drop_btn.Text  = opt
+            dropdown.Visible = false
+        end)
+        hover_button(opt_btn, Color3.fromRGB(28,28,34), theme.tab_active)
+    end
+
+    drop_btn.MouseButton1Click:Connect(function()
+        dropdown.Visible = not dropdown.Visible
+    end)
+
+    return row
+end
+
+-- ─── TAB CONTENT ──────────────────────────────────────────────────────────────
+local tab_frames = {}
+
+local function clear_content()
+    for _, f in pairs(tab_frames) do f:Destroy() end
+    tab_frames = {}
+end
+
+local function make_col(parent, x_offset, width)
+    local col = new("Frame", {
+        Size = UDim2.new(0, width, 1, 0),
+        Position = UDim2.fromOffset(x_offset, 0),
+        BackgroundTransparency = 1,
+        ClipsDescendants = false,
+    }, parent)
+    new("UIListLayout", { Padding = UDim.new(0, 8), VerticalAlignment = Enum.VerticalAlignment.Top }, col)
+    return col
+end
+
+local function build_combat(parent)
+    local scroll = new("ScrollingFrame", {
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ScrollBarThickness = 3,
+        ScrollBarImageColor3 = theme.accent,
+        CanvasSize = UDim2.fromOffset(0, 1200),
+    }, parent)
+
+    local col0 = make_col(scroll, 8, 390)
+    local col1 = make_col(scroll, 410, 390)
+
+    -- Aimbot panel
+    local _, aim_body = make_panel(col0, "Aimbot", 0, 390)
+    make_checkbox(aim_body, "Enabled",       AimbotCfg, "enabled", theme.accent)
+    make_checkbox(aim_body, "Team Check",    AimbotCfg, "team_check")
+    make_checkbox(aim_body, "Visible Check", AimbotCfg, "visible_check")
+    make_checkbox(aim_body, "Health Check",  AimbotCfg, "health_check")
+    make_checkbox(aim_body, "Sticky Aim",    AimbotCfg, "sticky")
+    make_slider  (aim_body, "Distance",      AimbotCfg, "distance",    0, 10000)
+    make_slider  (aim_body, "Sensitivity",   AimbotCfg, "sensitivity", 0, 2.5, "%.2f")
+    make_dropdown(aim_body, "Hit Part",      AimbotCfg, "hit_part",   {"Head","Torso","Closest"})
+    make_dropdown(aim_body, "Aim Type",      AimbotCfg, "aim_type",   {"Mouse","Camera"})
+    make_checkbox(aim_body, "Rage Mode",     AimbotCfg, "rage",        theme.red)
+    make_dropdown(aim_body, "Rage Type",     AimbotCfg, "rage_type",  {"Camera Lock","Camera Teleport"})
+
+    -- Smoothing panel
+    local _, smooth_body = make_panel(col0, "Smoothing", 0, 390)
+    make_checkbox(smooth_body, "Enabled",    AimbotCfg, "smooth")
+    make_slider  (smooth_body, "Smoothness", AimbotCfg, "smoothness", 1, 20, "%.1f")
+    make_dropdown(smooth_body, "Easing",     AimbotCfg, "easing",    {"Linear","Quad","Sine"})
+
+    -- Prediction panel
+    local _, pred_body = make_panel(col0, "Prediction", 0, 390)
+    make_checkbox(pred_body, "Enabled",  AimbotCfg, "predict")
+    make_slider  (pred_body, "Horizontal", AimbotCfg, "predict_x", 0, 1, "%.2f")
+    make_slider  (pred_body, "Vertical",   AimbotCfg, "predict_y", 0, 1, "%.2f")
+
+    -- FOV panel
+    local _, fov_body = make_panel(col1, "FOV Circle", 0, 390)
+    make_checkbox(fov_body, "Show FOV",    AimbotCfg, "fov_visible")
+    make_checkbox(fov_body, "Filled",      AimbotCfg, "fov_filled")
+    make_slider  (fov_body, "Radius",      AimbotCfg, "fov_radius", 10, 800)
+
+    -- Silent Aim panel
+    local _, sa_body = make_panel(col1, "Silent Aim", 0, 390)
+    make_checkbox(sa_body, "Enabled",      AimbotCfg, "silent")
+    make_checkbox(sa_body, "Team Check",   AimbotCfg, "team_check")
+    make_slider  (sa_body, "Distance",     AimbotCfg, "distance", 0, 10000)
+    make_dropdown(sa_body, "Method",       AimbotCfg, "silent_method", {"Raycast","Experimental"})
+
+    -- Triggerbot panel
+    local _, tb_body = make_panel(col1, "Trigger Bot", 0, 390)
+    make_checkbox(tb_body, "Enabled",      WeponCfg.trigger, "enabled")
+    make_checkbox(tb_body, "Visible Check",WeponCfg.trigger, "visible_check")
+    make_checkbox(tb_body, "Team Check",   WeponCfg.trigger, "team_check")
+    make_slider  (tb_body, "Hitbox Mul",   WeponCfg.trigger, "hitbox_mul",  1, 5, "%.2f")
+    make_slider  (tb_body, "Delay (ms)",   WeponCfg.trigger, "delay_ms",    0, 500)
+    make_slider  (tb_body, "Release (ms)", WeponCfg.trigger, "release_ms",  0, 500)
+
+    table.insert(tab_frames, scroll)
+end
+
+local function build_visuals(parent)
+    local scroll = new("ScrollingFrame", {
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ScrollBarThickness = 3,
+        ScrollBarImageColor3 = theme.accent,
+        CanvasSize = UDim2.fromOffset(0, 1400),
+    }, parent)
+
+    local col0 = make_col(scroll, 8, 390)
+    local col1 = make_col(scroll, 410, 390)
+
+    local _, esp_body = make_panel(col0, "ESP", 0, 390)
+    make_checkbox(esp_body, "Enabled",       EspCfg, "enabled", theme.accent)
+    make_checkbox(esp_body, "Team Check",    EspCfg, "team_check")
+    make_checkbox(esp_body, "Visible Check", EspCfg, "visible_check")
+    make_checkbox(esp_body, "Team Color",    EspCfg, "team_color")
+    make_checkbox(esp_body, "Outline",       EspCfg, "outline")
+    make_checkbox(esp_body, "Self ESP",      EspCfg, "self_esp")
+    make_slider  (esp_body, "Render Distance", EspCfg, "distance", 0, 30000)
+
+    local _, box_body = make_panel(col0, "Box", 0, 390)
+    make_checkbox(box_body, "Enabled",  EspCfg.box, "enabled")
+    make_checkbox(box_body, "Filled",   EspCfg.box, "filled")
+    make_dropdown(box_body, "Style",    EspCfg.box, "style", {"2D","Corner","3D"})
+
+    local _, name_body = make_panel(col0, "Name", 0, 390)
+    make_checkbox(name_body, "Enabled",    EspCfg.name, "enabled")
+    make_checkbox(name_body, "Display Name", EspCfg.name, "use_display")
+
+    local _, skel_body = make_panel(col0, "Skeleton", 0, 390)
+    make_checkbox(skel_body, "Enabled",   EspCfg.skeleton, "enabled")
+    make_slider  (skel_body, "Thickness", EspCfg.skeleton, "thickness", 1, 4)
+
+    local _, hp_body = make_panel(col1, "Health Bar", 0, 390)
+    make_checkbox(hp_body, "Bar",          EspCfg.health, "bar")
+    make_checkbox(hp_body, "Health Color", EspCfg.health, "based_color")
+    make_checkbox(hp_body, "Text",         EspCfg.health, "text")
+    make_dropdown(hp_body, "Position",     EspCfg.health, "position", {"Left","Right","Above Name","Below Name"})
+
+    local _, tracer_body = make_panel(col1, "Tracer", 0, 390)
+    make_checkbox(tracer_body, "Enabled",  EspCfg.tracer, "enabled")
+    make_dropdown(tracer_body, "Origin",   EspCfg.tracer, "origin", {"Bottom","Top","Mouse"})
+
+    local _, ch_body = make_panel(col1, "Crosshair", 0, 390)
+    make_checkbox(ch_body, "Enabled",    EspCfg.crosshair, "enabled")
+    make_checkbox(ch_body, "Center Dot", EspCfg.crosshair, "dot")
+    make_slider  (ch_body, "Size",       EspCfg.crosshair, "size",      2, 40)
+    make_slider  (ch_body, "Gap",        EspCfg.crosshair, "gap",       0, 20)
+    make_slider  (ch_body, "Thickness",  EspCfg.crosshair, "thickness", 1, 6)
+
+    local _, radar_body = make_panel(col1, "Radar", 0, 390)
+    make_checkbox(radar_body, "Enabled", EspCfg.radar, "enabled")
+    make_slider  (radar_body, "Range",   EspCfg.radar, "range", 50, 1000)
+    make_slider  (radar_body, "Size",    EspCfg.radar, "size",  80, 400)
+
+    local _, oof_body = make_panel(col1, "OOF Arrows", 0, 390)
+    make_checkbox(oof_body, "Enabled", EspCfg.oof_arrow, "enabled")
+    make_slider  (oof_body, "Radius",  EspCfg.oof_arrow, "radius", 50, 500)
+    make_slider  (oof_body, "Size",    EspCfg.oof_arrow, "size",   4,  32)
+
+    table.insert(tab_frames, scroll)
+end
+
+local function build_character(parent)
+    local scroll = new("ScrollingFrame", {
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ScrollBarThickness = 3,
+        ScrollBarImageColor3 = theme.accent,
+        CanvasSize = UDim2.fromOffset(0, 1200),
+    }, parent)
+
+    local col0 = make_col(scroll, 8, 390)
+    local col1 = make_col(scroll, 410, 390)
+
+    local _, hb_body = make_panel(col0, "Hitbox Extender", 0, 390)
+    make_checkbox(hb_body, "Enabled",      WeponCfg.hitbox, "enabled", theme.red)
+    make_checkbox(hb_body, "Visualize",    WeponCfg.hitbox, "visualize")
+    make_checkbox(hb_body, "Team Check",   WeponCfg.hitbox, "team_check")
+    make_checkbox(hb_body, "Health Check", WeponCfg.hitbox, "health_check")
+    make_slider  (hb_body, "Hitbox Size",  WeponCfg.hitbox, "size", 1, 100)
+    make_dropdown(hb_body, "Style",        WeponCfg.hitbox, "style", {"Old","New"})
+
+    local _, rc_body = make_panel(col1, "Recoil Control", 0, 390)
+    make_checkbox(rc_body, "Enabled",  WeponCfg.recoil, "enabled")
+    make_slider  (rc_body, "Strength", WeponCfg.recoil, "strength", 0, 1, "%.2f")
+    make_dropdown(rc_body, "Mode",     WeponCfg.recoil, "mode", {"Mouse","Camera"})
+
+    local _, bd_body = make_panel(col1, "Bullet Drop", 0, 390)
+    make_checkbox(bd_body, "Enabled",        WeponCfg.bullet_drop, "enabled")
+    make_slider  (bd_body, "Projectile Vel", WeponCfg.bullet_drop, "velocity", 100, 10000)
+    make_slider  (bd_body, "Gravity",        WeponCfg.bullet_drop, "gravity",  0,   400, "%.1f")
+
+    table.insert(tab_frames, scroll)
+end
+
+local function build_configs(parent)
+    local frame = new("Frame", { Size=UDim2.fromScale(1,1), BackgroundTransparency=1 }, parent)
+
+    local col0 = make_col(frame, 8, 390)
+    local _, cfg_body = make_panel(col0, "Config Manager", 0, 390)
+
+    -- Config name input
+    local name_box = new("TextBox", {
+        Size = UDim2.new(1, 0, 0, 26),
+        BackgroundColor3 = theme.panel,
+        Text = "",
+        PlaceholderText = "Config name...",
+        Font = Enum.Font.Gotham,
+        TextSize = 13,
+        TextColor3 = theme.text_bright,
+        BorderSizePixel = 0,
+        ClearTextOnFocus = false,
+    }, cfg_body)
+    new("UICorner", { CornerRadius = UDim.new(0, 4) }, name_box)
+    new("UIStroke", { Color = theme.border, Thickness=1, ApplyStrokeMode=Enum.ApplyStrokeMode.Border}, name_box)
+    new("UIPadding", { PaddingLeft = UDim.new(0,8) }, name_box)
+
+    -- Build a combined cfg for save/load
+    local function combined_cfg()
+        return { aim = AimbotCfg, esp = EspCfg, wepon = WeponCfg }
+    end
+
+    local function make_action_btn(label_text, parent_frame, callback)
+        local btn = new("TextButton", {
+            Size = UDim2.new(1, 0, 0, 26),
+            BackgroundColor3 = theme.accent_dim,
+            Text = label_text,
+            Font = Enum.Font.GothamBold,
+            TextSize = 13,
+            TextColor3 = Color3.fromRGB(255,255,255),
+            BorderSizePixel = 0,
+            AutoButtonColor = false,
+        }, parent_frame)
+        new("UICorner", { CornerRadius = UDim.new(0, 4) }, btn)
+        btn.MouseButton1Click:Connect(callback)
+        hover_button(btn, theme.accent_dim, theme.accent)
+        return btn
+    end
+
+    make_action_btn("Save Config", cfg_body, function()
+        local name = name_box.Text ~= "" and name_box.Text or "default"
+        Config.save(combined_cfg(), name)
+    end)
+    make_action_btn("Load Config", cfg_body, function()
+        local name = name_box.Text ~= "" and name_box.Text or "default"
+        Config.load(combined_cfg(), name)
+    end)
+    make_action_btn("Delete Config", cfg_body, function()
+        local name = name_box.Text ~= "" and name_box.Text or "default"
+        Config.delete(name)
+    end)
+
+    -- Presets
+    local _, pre_body = make_panel(col0, "Presets", 0, 390)
+    for _, preset_name in ipairs(Config.preset_names()) do
+        make_action_btn(preset_name, pre_body, function()
+            Config.apply_preset(combined_cfg(), preset_name)
+        end)
+    end
+
+    table.insert(tab_frames, frame)
+end
+
+-- ─── UPDATE CONTENT ───────────────────────────────────────────────────────────
+local builders = {
+    Combat    = build_combat,
+    Visuals   = build_visuals,
+    World     = function(p) end,  -- FILL: mirror World tab from Matcha
+    Character = build_character,
+    Options   = function(p) end,  -- FILL: mirror Options tab
+    Configs   = build_configs,
+}
+
+function update_content()
+    clear_content()
+    local builder = builders[active_tab]
+    if builder then builder(Content) end
+end
+
+update_content()
+
+-- ─── MENU TOGGLE ──────────────────────────────────────────────────────────────
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.KeyCode == menu_key then
+        menu_open = not menu_open
+        if menu_open then
+            Main.Visible = true
+            Main.Size    = UDim2.fromOffset(0, 0)
+            tween(Main, {Size = UDim2.fromOffset(W, H)}, 0.15)
+        else
+            tween(Main, {Size = UDim2.fromOffset(0, 0)}, 0.12)
+            task.delay(0.12, function() Main.Visible = false end)
+        end
+    end
+end)
+
+-- ─── WATERMARK ────────────────────────────────────────────────────────────────
+local wm = new("Frame", {
+    Size = UDim2.fromOffset(200, 24),
+    Position = UDim2.fromOffset(8, 8),
+    BackgroundColor3 = Color3.fromRGB(18,18,22),
+    BorderSizePixel  = 0,
+}, ScreenGui)
+new("UICorner", { CornerRadius = UDim.new(0, 4) }, wm)
+new("UIStroke", { Color = theme.border, Thickness=1, ApplyStrokeMode=Enum.ApplyStrokeMode.Border }, wm)
+local wm_lbl = new("TextLabel", {
+    Size = UDim2.fromScale(1, 1),
+    BackgroundTransparency = 1,
+    Font = Enum.Font.GothamBold,
+    TextSize = 12,
+    TextColor3 = theme.text,
+    Text = "matcha | " .. LocalPlayer.Name,
+}, wm)
+
+RunService.RenderStepped:Connect(function()
+    wm.Visible = true  -- FILL: tie to options cfg
+end)
+
+print("[UI] loaded — Insert to toggle")
