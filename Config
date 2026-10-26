@@ -1,1 +1,299 @@
+-- Config.lua | LuaU | Roblox Executor
+-- Config system: save/load settings to executor writefile/readfile, presets, hotkey binds
 
+local HttpService = game:GetService("HttpService")
+
+-- ─── CONFIG SYSTEM ────────────────────────────────────────────────────────────
+local Config = {}
+Config.__index = Config
+
+-- Default config path — executors write to their own workspace folder
+local CONFIG_DIR = "matcha_configs/"
+local EXT        = ".json"
+
+-- ─── FILE I/O WRAPPERS ────────────────────────────────────────────────────────
+-- Handles executor differences: syn.filesystem, readfile/writefile, etc.
+local fs = {}
+
+function fs.write(path, data)
+    if writefile then
+        writefile(path, data)
+    elseif syn and syn.writefile then
+        syn.writefile(path, data)
+    end
+end
+
+function fs.read(path)
+    if readfile then
+        return readfile(path)
+    elseif syn and syn.readfile then
+        return syn.readfile(path)
+    end
+    return nil
+end
+
+function fs.exists(path)
+    if isfile then return isfile(path) end
+    if syn and syn.isfile then return syn.isfile(path) end
+    -- fallback: try reading
+    local ok, _ = pcall(fs.read, path)
+    return ok
+end
+
+function fs.mkdir(path)
+    if isfolder and not isfolder(path) then
+        if makefolder then makefolder(path) end
+    elseif syn and syn.isfolder and not syn.isfolder(path) then
+        if syn.makefolder then syn.makefolder(path) end
+    else
+        -- executor may auto-create on writefile
+        pcall(makefolder or function() end, path)
+    end
+end
+
+-- ─── SERIALIZATION ────────────────────────────────────────────────────────────
+-- Convert Color3 / Enum values to serializable form and back
+local function serialize_value(v)
+    if typeof(v) == "Color3" then
+        return { __type = "Color3", r = v.R, g = v.G, b = v.B }
+    elseif typeof(v) == "EnumItem" then
+        return { __type = "EnumItem", enum = tostring(v.EnumType), name = v.Name }
+    elseif type(v) == "table" then
+        local t = {}
+        for k, val in pairs(v) do
+            t[k] = serialize_value(val)
+        end
+        return t
+    end
+    return v
+end
+
+local function deserialize_value(v)
+    if type(v) == "table" then
+        if v.__type == "Color3" then
+            return Color3.new(v.r, v.g, v.b)
+        elseif v.__type == "EnumItem" then
+            local ok, result = pcall(function()
+                return Enum[v.enum][v.name]
+            end)
+            return ok and result or Enum.KeyCode.Unknown
+        else
+            local t = {}
+            for k, val in pairs(v) do
+                t[k] = deserialize_value(val)
+            end
+            return t
+        end
+    end
+    return v
+end
+
+-- Deep merge: apply saved values onto existing cfg table (preserves keys not in save)
+local function deep_merge(target, source)
+    for k, v in pairs(source) do
+        if type(v) == "table" and type(target[k]) == "table" then
+            deep_merge(target[k], v)
+        else
+            target[k] = v
+        end
+    end
+end
+
+-- ─── PRESETS ──────────────────────────────────────────────────────────────────
+local presets = {
+    Legit = {
+        aim = {
+            enabled     = true,
+            fov_radius  = 80,
+            sensitivity = 0.3,
+            smoothness  = 8,
+            easing      = "Sine",
+            predict     = true,
+            visible_check = true,
+            team_check  = true,
+        },
+        esp = { enabled = true, visible_check = true },
+        trigger = { enabled = false },
+        hitbox  = { enabled = false },
+    },
+    Rage = {
+        aim = {
+            enabled     = true,
+            fov_radius  = 400,
+            sensitivity = 1.0,
+            smoothness  = 1,
+            rage        = true,
+            rage_type   = "Camera Lock",
+            predict     = true,
+            team_check  = true,
+        },
+        esp    = { enabled = true },
+        trigger= { enabled = true, delay_ms = 0, release_ms = 20 },
+        hitbox = { enabled = true, size = 20 },
+    },
+    Visuals = {
+        aim    = { enabled = false },
+        esp    = { enabled = true },
+        trigger= { enabled = false },
+        hitbox = { enabled = false },
+        crosshair = { enabled = true },
+        radar     = { enabled = true },
+        oof_arrow = { enabled = true },
+        skeleton  = { enabled = true },
+        tracer    = { enabled = true },
+    },
+}
+
+-- ─── PUBLIC API ───────────────────────────────────────────────────────────────
+
+-- Save current cfg to file
+function Config.save(cfg_table, name)
+    fs.mkdir(CONFIG_DIR)
+    local path = CONFIG_DIR .. name .. EXT
+    local serialized = serialize_value(cfg_table)
+    local ok, err = pcall(function()
+        local json = HttpService:JSONEncode(serialized)
+        fs.write(path, json)
+    end)
+    if ok then
+        print("[Config] saved → " .. path)
+        return true
+    else
+        warn("[Config] save failed: " .. tostring(err))
+        return false
+    end
+end
+
+-- Load cfg from file into cfg_table (merges, does not replace)
+function Config.load(cfg_table, name)
+    local path = CONFIG_DIR .. name .. EXT
+    if not fs.exists(path) then
+        warn("[Config] file not found: " .. path)
+        return false
+    end
+    local ok, data = pcall(function()
+        local raw = fs.read(path)
+        return HttpService:JSONDecode(raw)
+    end)
+    if not ok then
+        warn("[Config] parse error")
+        return false
+    end
+    local deserialized = deserialize_value(data)
+    deep_merge(cfg_table, deserialized)
+    print("[Config] loaded ← " .. path)
+    return true
+end
+
+-- Delete a config file
+function Config.delete(name)
+    local path = CONFIG_DIR .. name .. EXT
+    if delfile then
+        pcall(delfile, path)
+    elseif syn and syn.delfile then
+        pcall(syn.delfile, path)
+    end
+    print("[Config] deleted: " .. path)
+end
+
+-- List all saved configs
+function Config.list()
+    local results = {}
+    if listfiles then
+        local ok, files = pcall(listfiles, CONFIG_DIR)
+        if ok then
+            for _, f in ipairs(files) do
+                local name = f:match("([^/\\]+)" .. EXT .. "$")
+                if name then table.insert(results, name) end
+            end
+        end
+    end
+    return results
+end
+
+-- Apply a named preset to cfg_table
+function Config.apply_preset(cfg_table, preset_name)
+    local preset = presets[preset_name]
+    if not preset then
+        warn("[Config] unknown preset: " .. tostring(preset_name))
+        return false
+    end
+    deep_merge(cfg_table, preset)
+    print("[Config] preset applied: " .. preset_name)
+    return true
+end
+
+-- List available preset names
+function Config.preset_names()
+    local names = {}
+    for k in pairs(presets) do table.insert(names, k) end
+    table.sort(names)
+    return names
+end
+
+-- Auto-save on interval (seconds). Returns a connection to disconnect later.
+function Config.auto_save(cfg_table, name, interval_secs)
+    interval_secs = interval_secs or 60
+    local run = game:GetService("RunService")
+    local elapsed = 0
+    local conn = run.Heartbeat:Connect(function(dt)
+        elapsed = elapsed + dt
+        if elapsed >= interval_secs then
+            elapsed = 0
+            Config.save(cfg_table, name)
+        end
+    end)
+    print(string.format("[Config] auto-save enabled every %ds → %s", interval_secs, name))
+    return conn
+end
+
+-- ─── KEYBIND REGISTRY ─────────────────────────────────────────────────────────
+-- Tracks all active keybinds for the keybind list UI element
+local keybind_registry = {}
+
+function Config.register_keybind(label, get_key_fn, is_active_fn)
+    keybind_registry[label] = { key = get_key_fn, active = is_active_fn }
+end
+
+function Config.get_keybinds()
+    local result = {}
+    for label, data in pairs(keybind_registry) do
+        local ok_key, key    = pcall(data.key)
+        local ok_act, active = pcall(data.active)
+        table.insert(result, {
+            label  = label,
+            key    = ok_key and tostring(key) or "?",
+            active = ok_act and active or false,
+        })
+    end
+    table.sort(result, function(a, b) return a.label < b.label end)
+    return result
+end
+
+-- ─── KEYBIND LIST DRAWING ─────────────────────────────────────────────────────
+local kb_drawings = {}
+
+local function update_keybind_list(show)
+    local binds = Config.get_keybinds()
+    while #kb_drawings < #binds do
+        local t = Drawing.new("Text")
+        t.Size = 12; t.Outline = true; t.Font = 2
+        table.insert(kb_drawings, t)
+    end
+    local vp = game:GetService("Workspace").CurrentCamera.ViewportSize
+    for i, bind in ipairs(binds) do
+        local d = kb_drawings[i]
+        d.Color    = bind.active and Color3.fromRGB(181,96,96) or Color3.fromRGB(120,120,130)
+        d.Text     = string.format("[%s] %s", bind.key, bind.label)
+        d.Position = Vector2.new(vp.X - 160, vp.Y - 20 - (#binds - i) * 15)
+        d.Visible  = show
+    end
+    for i = #binds + 1, #kb_drawings do kb_drawings[i].Visible = false end
+end
+
+game:GetService("RunService").RenderStepped:Connect(function()
+    update_keybind_list(true)  -- FILL: tie to cfg.elements.keybinds boolean
+end)
+
+print("[Config] loaded")
+return Config
