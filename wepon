@@ -1,1 +1,288 @@
-
+-- wepon.lua | LuaU | Roblox Executor
+-- Weapon module: triggerbot, hitbox extender, silent aim hook, bullet prediction, recoil control
+ 
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+ 
+local LocalPlayer = Players.LocalPlayer
+local Camera      = Workspace.CurrentCamera
+ 
+-- ─── CONFIG ───────────────────────────────────────────────────────────────────
+local cfg = {
+    trigger = {
+        enabled      = false,
+        key          = Enum.KeyCode.Q,
+        visible_check= true,
+        team_check   = true,
+        hitbox_mul   = 1.2,   -- scale factor for hit detection sphere
+        delay_ms     = 40,
+        release_ms   = 80,
+        auto_fire    = false, -- hold key to spam, or single shot per entry
+    },
+ 
+    hitbox = {
+        enabled      = false,
+        key          = Enum.KeyCode.J,
+        visualize    = false,
+        team_check   = true,
+        health_check = false,
+        size         = 12,        -- studs
+        style        = "New",     -- "Old" (flat size) | "New" (proportional)
+        shape        = "Sphere",  -- "Sphere" | "Box"
+    },
+ 
+    recoil = {
+        enabled      = false,
+        key          = Enum.UserInputType.MouseButton1,
+        strength     = 0.5,       -- 0→1 how much to counteract
+        mode         = "Mouse",   -- "Mouse" | "Camera"
+    },
+ 
+    bullet_drop = {
+        -- gravity compensation for projectile weapons
+        enabled      = false,
+        gravity      = 196.2,     -- studs/s² (Roblox default workspace gravity)
+        velocity     = 3000,      -- projectile stud/s — FILL per weapon
+    },
+}
+ 
+-- ─── UTIL ─────────────────────────────────────────────────────────────────────
+local function is_alive(p)
+    local c = p.Character
+    if not c then return false end
+    local h = c:FindFirstChildOfClass("Humanoid")
+    return h and h.Health > 0
+end
+ 
+local function same_team(p)
+    return cfg.trigger.team_check and p.Team ~= nil and p.Team == LocalPlayer.Team
+end
+ 
+local function is_visible(pos)
+    local origin = Camera.CFrame.Position
+    local hit    = Workspace:FindPartOnRayWithIgnoreList(
+        Ray.new(origin, pos - origin), { LocalPlayer.Character })
+    if not hit then return true end
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl ~= LocalPlayer and pl.Character and hit:IsDescendantOf(pl.Character) then
+            return true
+        end
+    end
+    return false
+end
+ 
+-- Bullet drop: vertical aim offset so projectile lands on target
+-- Returns a world-space position adjusted upward by drop compensation
+local function compensate_drop(target_pos)
+    if not cfg.bullet_drop.enabled then return target_pos end
+    local origin = Camera.CFrame.Position
+    local dist   = (target_pos - origin).Magnitude
+    local tof    = dist / cfg.bullet_drop.velocity  -- time of flight
+    local drop   = 0.5 * cfg.bullet_drop.gravity * tof * tof
+    return target_pos + Vector3.new(0, drop, 0)
+end
+ 
+-- ─── TRIGGERBOT ───────────────────────────────────────────────────────────────
+local trigger_fired = false
+ 
+RunService.Heartbeat:Connect(function()
+    if not cfg.trigger.enabled then trigger_fired = false; return end
+ 
+    local holding = UserInputService:IsKeyDown(cfg.trigger.key)
+    if not holding then trigger_fired = false; return end
+ 
+    local vp  = Camera.ViewportSize
+    local ray = Camera:ScreenPointToRay(vp.X/2, vp.Y/2)
+    local ignore = { LocalPlayer.Character }
+    local hit, pos = Workspace:FindPartOnRayWithIgnoreList(
+        Ray.new(ray.Origin, ray.Direction * 2000), ignore)
+ 
+    if not hit then trigger_fired = false; return end
+ 
+    local hit_player = Players:GetPlayerFromCharacter(hit.Parent)
+    if not hit_player or hit_player == LocalPlayer then trigger_fired = false; return end
+    if same_team(hit_player) then trigger_fired = false; return end
+    if not is_alive(hit_player) then trigger_fired = false; return end
+    if cfg.trigger.visible_check and not is_visible(pos) then trigger_fired = false; return end
+ 
+    -- inflate check sphere
+    local sphere_radius = hit.Size.Magnitude * cfg.trigger.hitbox_mul
+    local dist_to_hit   = (pos - Camera.CFrame.Position).Magnitude
+    if dist_to_hit > sphere_radius * 80 then trigger_fired = false; return end
+ 
+    if trigger_fired and not cfg.trigger.auto_fire then return end
+    trigger_fired = true
+ 
+    task.delay(cfg.trigger.delay_ms / 1000, function()
+        if mouse1press then
+            mouse1press()
+            task.delay(cfg.trigger.release_ms / 1000, function()
+                if mouse1release then mouse1release() end
+                trigger_fired = false
+            end)
+        end
+    end)
+end)
+ 
+-- ─── HITBOX EXTENDER ──────────────────────────────────────────────────────────
+local hitbox_active  = false
+local original_sizes = {}  -- [BasePart] = Vector3
+ 
+local function expand_hitboxes()
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl == LocalPlayer then continue end
+        if cfg.hitbox.team_check and same_team(pl) then continue end
+        if not pl.Character then continue end
+        local hum = pl.Character:FindFirstChildOfClass("Humanoid")
+        if cfg.hitbox.health_check and hum and hum.Health <= 0 then continue end
+        for _, part in ipairs(pl.Character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                if not original_sizes[part] then
+                    original_sizes[part] = part.Size
+                end
+                if cfg.hitbox.style == "Old" then
+                    if cfg.hitbox.shape == "Sphere" then
+                        local s = cfg.hitbox.size
+                        part.Size = Vector3.new(s, s, s)
+                    else
+                        part.Size = Vector3.new(cfg.hitbox.size, cfg.hitbox.size, cfg.hitbox.size)
+                    end
+                else
+                    -- New: scale from original
+                    local orig = original_sizes[part]
+                    part.Size  = orig * (cfg.hitbox.size / math.max(orig.X, orig.Y, orig.Z, 0.1))
+                end
+            end
+        end
+    end
+end
+ 
+local function restore_hitboxes()
+    for part, orig in pairs(original_sizes) do
+        if part and part.Parent then part.Size = orig end
+    end
+    original_sizes = {}
+end
+ 
+-- Hitbox visualizer (optional) — draws a sphere indicator over each expanded part
+local hitbox_visuals = {}
+ 
+local function update_hitbox_visuals()
+    if not cfg.hitbox.visualize or not hitbox_active then
+        for _, v in ipairs(hitbox_visuals) do v.Visible = false end
+        return
+    end
+    local vp = Camera.ViewportSize
+    local idx = 1
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl == LocalPlayer then continue end
+        if not pl.Character then continue end
+        for _, part in ipairs(pl.Character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                local s, on = Camera:WorldToViewportPoint(part.Position)
+                if not hitbox_visuals[idx] then
+                    hitbox_visuals[idx] = Drawing.new("Circle")
+                    hitbox_visuals[idx].Filled = false
+                    hitbox_visuals[idx].Thickness = 1
+                    hitbox_visuals[idx].Color = Color3.fromRGB(255,80,80)
+                    hitbox_visuals[idx].NumSides = 24
+                end
+                local vis = hitbox_visuals[idx]; idx = idx + 1
+                if on then
+                    -- approximate screen radius from world size
+                    local dist = (part.Position - Camera.CFrame.Position).Magnitude
+                    local fov_scale = vp.Y / (2 * math.tan(math.rad(Camera.FieldOfView/2)))
+                    vis.Radius  = (cfg.hitbox.size / 2) * fov_scale / math.max(dist, 1)
+                    vis.Position= Vector2.new(s.X, s.Y)
+                    vis.Visible = true
+                else vis.Visible = false end
+            end
+        end
+    end
+    for i = idx, #hitbox_visuals do hitbox_visuals[i].Visible = false end
+end
+ 
+UserInputService.InputBegan:Connect(function(input)
+    if not cfg.hitbox.enabled then return end
+    if input.KeyCode == cfg.hitbox.key then
+        hitbox_active = true
+        expand_hitboxes()
+    end
+end)
+UserInputService.InputEnded:Connect(function(input)
+    if input.KeyCode == cfg.hitbox.key then
+        hitbox_active = false
+        restore_hitboxes()
+    end
+end)
+ 
+RunService.RenderStepped:Connect(update_hitbox_visuals)
+ 
+-- ─── RECOIL CONTROL ───────────────────────────────────────────────────────────
+-- Compensates vertical recoil by moving mouse downward while firing
+-- FILL: tune strength per weapon, or read recoil pattern from game memory
+local recoil_last = tick()
+ 
+RunService.Heartbeat:Connect(function()
+    if not cfg.recoil.enabled then return end
+    local firing = UserInputService:IsMouseButtonPressed(cfg.recoil.key)
+    if not firing then recoil_last = tick(); return end
+ 
+    local dt = tick() - recoil_last
+    recoil_last = tick()
+ 
+    local comp = cfg.recoil.strength * 100 * dt
+ 
+    if cfg.recoil.mode == "Mouse" then
+        if mousemoverel then mousemoverel(0, comp) end
+    else
+        -- Camera-space compensation
+        local cf  = Camera.CFrame
+        local axis = cf.RightVector
+        Camera.CFrame = CFrame.fromAxisAngle(axis, math.rad(-comp * 0.05)) * cf
+    end
+end)
+ 
+-- ─── BULLET DROP PREVIEW (draws trajectory arc) ───────────────────────────────
+local traj_lines = {}
+for i = 1, 20 do
+    traj_lines[i] = Drawing.new("Line")
+    traj_lines[i].Color     = Color3.fromRGB(255, 200, 50)
+    traj_lines[i].Thickness = 1
+    traj_lines[i].Visible   = false
+end
+ 
+RunService.RenderStepped:Connect(function()
+    if not cfg.bullet_drop.enabled then
+        for _, l in ipairs(traj_lines) do l.Visible = false end
+        return
+    end
+    local origin = Camera.CFrame.Position
+    local dir    = Camera.CFrame.LookVector
+    local vel    = cfg.bullet_drop.velocity
+    local grav   = cfg.bullet_drop.gravity
+    local dt     = 0.05
+    local px, py, pz = origin.X, origin.Y, origin.Z
+    local vx, vy, vz = dir.X*vel, dir.Y*vel, dir.Z*vel
+    local prev_s, prev_on = Camera:WorldToViewportPoint(Vector3.new(px,py,pz))
+ 
+    for i = 1, 20 do
+        vx = vx; vy = vy - grav*dt; vz = vz
+        px = px + vx*dt; py = py + vy*dt; pz = pz + vz*dt
+        local curr, curr_on = Camera:WorldToViewportPoint(Vector3.new(px,py,pz))
+        local line = traj_lines[i]
+        if prev_on and curr_on and curr.Z > 0 then
+            line.From    = Vector2.new(prev_s.X, prev_s.Y)
+            line.To      = Vector2.new(curr.X,   curr.Y)
+            line.Visible = true
+        else
+            line.Visible = false
+        end
+        prev_s, prev_on = curr, curr_on
+    end
+end)
+ 
+print("[Weapon] loaded")
+return cfg
+ 
