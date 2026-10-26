@@ -1,1 +1,275 @@
-
+-- Aimbot.lua | LuaU | Roblox Executor (Synapse X / KRNL / Fluxus)
+-- Aimbot module: target selection, smoothing, prediction, FOV, silent aim
+ 
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+ 
+local LocalPlayer = Players.LocalPlayer
+local Camera      = Workspace.CurrentCamera
+ 
+-- ─── CONFIG ───────────────────────────────────────────────────────────────────
+local cfg = {
+    enabled       = false,
+    key           = Enum.UserInputType.MouseButton2,
+    team_check    = true,
+    visible_check = false,
+    health_check  = false,
+    sticky        = false,
+    distance      = 500,
+    sensitivity   = 0.45,
+    hit_part      = "Head",    -- "Head" | "Torso" | "Closest"
+    aim_type      = "Mouse",   -- "Mouse" | "Camera"
+    rage          = false,
+    rage_type     = "Camera Lock", -- "Camera Lock" | "Camera Teleport"
+    predict       = true,
+    predict_x     = 0.12,
+    predict_y     = 0.08,
+    smooth        = true,
+    smoothness    = 5,         -- 1 (instant) → 20 (very slow)
+    easing        = "Sine",    -- "Linear" | "Quad" | "Sine"
+    fov_visible   = true,
+    fov_color     = Color3.fromRGB(255, 255, 255),
+    fov_filled    = false,
+    fov_radius    = 120,
+    silent        = false,
+    silent_key    = Enum.KeyCode.E,
+    silent_method = "Raycast", -- "Raycast" | "Experimental"
+    resolver      = false,
+}
+ 
+-- ─── UTIL ─────────────────────────────────────────────────────────────────────
+local function is_alive(p)
+    local c = p.Character
+    if not c then return false end
+    local h = c:FindFirstChildOfClass("Humanoid")
+    return h and h.Health > 0
+end
+ 
+local function get_root(p)
+    return p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+end
+ 
+local function same_team(p)
+    return cfg.team_check and p.Team ~= nil and p.Team == LocalPlayer.Team
+end
+ 
+local function w2s(pos)
+    local v, on = Camera:WorldToViewportPoint(pos)
+    return Vector2.new(v.X, v.Y), on, v.Z
+end
+ 
+local function is_visible(pos)
+    local origin = Camera.CFrame.Position
+    local ray    = Ray.new(origin, (pos - origin))
+    local ignore = { LocalPlayer.Character, Camera }
+    local hit    = Workspace:FindPartOnRayWithIgnoreList(ray, ignore)
+    if not hit then return true end
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl ~= LocalPlayer and pl.Character and hit:IsDescendantOf(pl.Character) then
+            return true
+        end
+    end
+    return false
+end
+ 
+local function predict(root, px, py)
+    if not root then return root.Position end
+    local v = root.Velocity
+    return root.Position + Vector3.new(v.X * px, v.Y * py, v.Z * px)
+end
+ 
+local function ease(t, mode)
+    if mode == "Linear" then return t
+    elseif mode == "Quad" then return t * t
+    elseif mode == "Sine" then return 1 - math.cos(t * math.pi / 2)
+    end
+    return t
+end
+ 
+local function get_hit_part(player)
+    local c = player.Character
+    if not c then return nil end
+    if cfg.hit_part == "Head" then
+        return c:FindFirstChild("Head")
+    elseif cfg.hit_part == "Torso" then
+        return c:FindFirstChild("UpperTorso") or c:FindFirstChild("Torso")
+    elseif cfg.hit_part == "Closest" then
+        local best, bd = nil, math.huge
+        local cam = Camera.CFrame.Position
+        for _, p in ipairs(c:GetDescendants()) do
+            if p:IsA("BasePart") then
+                local d = (p.Position - cam).Magnitude
+                if d < bd then bd = d; best = p end
+            end
+        end
+        return best
+    end
+end
+ 
+-- ─── TARGET SELECTION ─────────────────────────────────────────────────────────
+local function best_target()
+    local vp     = Camera.ViewportSize
+    local center = Vector2.new(vp.X / 2, vp.Y / 2)
+    local best, bestDist = nil, math.huge
+ 
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+        if not is_alive(player) then continue end
+        if same_team(player) then continue end
+ 
+        local part = get_hit_part(player)
+        if not part then continue end
+ 
+        local target_pos = part.Position
+        if cfg.predict then
+            local root = get_root(player)
+            if root then
+                local p = predict(root, cfg.predict_x, cfg.predict_y)
+                target_pos = Vector3.new(p.X, part.Position.Y, p.Z)
+            end
+        end
+ 
+        local root = get_root(player)
+        local localRoot = get_root(LocalPlayer)
+        local worldDist = root and localRoot
+            and (root.Position - localRoot.Position).Magnitude or math.huge
+        if worldDist > cfg.distance then continue end
+ 
+        if cfg.visible_check and not is_visible(target_pos) then continue end
+ 
+        local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+        if cfg.health_check and hum and hum.Health <= 0 then continue end
+ 
+        local sp, on, depth = w2s(target_pos)
+        if not on or depth < 0 then continue end
+ 
+        local dist = (sp - center).Magnitude
+        if dist > cfg.fov_radius then continue end
+ 
+        if dist < bestDist then
+            bestDist = dist
+            best = { player = player, part = part, pos = target_pos, screen = sp }
+        end
+    end
+    return best
+end
+ 
+-- ─── FOV CIRCLE ───────────────────────────────────────────────────────────────
+local fov_draw = Drawing.new("Circle")
+fov_draw.NumSides  = 64
+fov_draw.Thickness = 1
+ 
+RunService.RenderStepped:Connect(function()
+    local vp = Camera.ViewportSize
+    fov_draw.Position     = Vector2.new(vp.X / 2, vp.Y / 2)
+    fov_draw.Radius       = cfg.fov_radius
+    fov_draw.Color        = cfg.fov_color
+    fov_draw.Filled       = cfg.fov_filled
+    fov_draw.Transparency = cfg.fov_filled and 0.8 or 1
+    fov_draw.Visible      = cfg.enabled and cfg.fov_visible
+end)
+ 
+-- ─── AIMBOT LOOP ──────────────────────────────────────────────────────────────
+local locked = nil
+ 
+RunService.RenderStepped:Connect(function(dt)
+    if not cfg.enabled then locked = nil; return end
+ 
+    local holding = UserInputService:IsMouseButtonPressed(cfg.key)
+    if not holding and cfg.key.EnumType == Enum.KeyCode then
+        holding = UserInputService:IsKeyDown(cfg.key)
+    end
+    if not holding then locked = nil; return end
+ 
+    local target = (cfg.sticky and locked and is_alive(locked.player) and locked)
+                   or best_target()
+    if cfg.sticky then locked = target end
+    if not target then return end
+ 
+    local part = get_hit_part(target.player)
+    if not part then return end
+ 
+    local pos = part.Position
+    if cfg.predict then
+        local root = get_root(target.player)
+        if root then
+            local p = predict(root, cfg.predict_x, cfg.predict_y)
+            pos = Vector3.new(p.X, part.Position.Y, p.Z)
+        end
+    end
+ 
+    -- resolver: basic anti-desync nudge
+    if cfg.resolver then
+        local root = get_root(target.player)
+        if root then
+            pos = pos + root.Velocity * 0.05
+        end
+    end
+ 
+    -- Rage / camera aim
+    if cfg.rage or cfg.aim_type == "Camera" then
+        local dir = (pos - Camera.CFrame.Position).Unit
+        if cfg.rage_type == "Camera Lock" then
+            Camera.CFrame = CFrame.new(Camera.CFrame.Position, Camera.CFrame.Position + dir)
+        else
+            Camera.CFrame = CFrame.new(pos - Camera.CFrame.LookVector * 5, pos)
+        end
+        return
+    end
+ 
+    -- Mouse aim
+    local sp, on = w2s(pos)
+    if not on then return end
+ 
+    local vp     = Camera.ViewportSize
+    local center = Vector2.new(vp.X / 2, vp.Y / 2)
+    local delta  = sp - center
+ 
+    if cfg.smooth then
+        local t = ease(math.min(1, dt * (21 - cfg.smoothness) * cfg.sensitivity * 3), cfg.easing)
+        delta = delta * t
+    else
+        delta = delta * cfg.sensitivity
+    end
+ 
+    mousemoverel(delta.X, delta.Y)
+end)
+ 
+-- ─── SILENT AIM ───────────────────────────────────────────────────────────────
+local silent_on = false
+UserInputService.InputBegan:Connect(function(i)
+    if i.KeyCode == cfg.silent_key then silent_on = true end
+end)
+UserInputService.InputEnded:Connect(function(i)
+    if i.KeyCode == cfg.silent_key then silent_on = false end
+end)
+ 
+-- Hook strategy: newcclosure wrap on FireServer
+-- FILL: replace "BulletFired" with your game's gun remote name
+local function hook_silent()
+    local function try_hook(remote)
+        if not remote or not remote:IsA("RemoteEvent") then return end
+        local orig = remote.FireServer
+        remote.FireServer = newcclosure(function(self, ...)
+            if not cfg.silent or not silent_on then return orig(self, ...) end
+            local t = best_target()
+            if not t then return orig(self, ...) end
+            local part = get_hit_part(t.player)
+            if not part then return orig(self, ...) end
+            local args = { ... }
+            if #args >= 1 then args[1] = part.Position end
+            return orig(self, table.unpack(args))
+        end)
+    end
+    -- FILL: path to your game's bullet remote
+    task.defer(function()
+        local r = Workspace:FindFirstChild("BulletFired", true)
+        try_hook(r)
+    end)
+end
+hook_silent()
+ 
+print("[Aimbot] loaded")
+return cfg  -- expose cfg so UI.lua can bind toggles
+ 
