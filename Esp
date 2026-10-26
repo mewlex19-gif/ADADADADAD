@@ -1,1 +1,452 @@
-
+-- Esp.lua | LuaU | Roblox Executor
+-- ESP module: box, name, health, skeleton, tracer, chams, head dot, oof arrows, radar, crosshair
+ 
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+ 
+local LocalPlayer = Players.LocalPlayer
+local Camera      = Workspace.CurrentCamera
+ 
+-- ─── CONFIG ───────────────────────────────────────────────────────────────────
+local cfg = {
+    enabled        = true,
+    team_check     = true,
+    visible_check  = false,
+    visible_color  = Color3.fromRGB(161, 199, 255),
+    hidden_color   = Color3.fromRGB(255, 60,  60 ),
+    team_color     = false,
+    outline        = true,
+    self_esp       = false,
+    distance       = 3000,
+ 
+    box = {
+        enabled    = true,
+        filled     = false,
+        color      = Color3.fromRGB(255, 255, 255),
+        fill_color = Color3.fromRGB(255, 255, 255),
+        fill_alpha = 0.12,
+        style      = "2D",   -- "2D" | "Corner" | "3D"
+    },
+ 
+    name = {
+        enabled    = true,
+        color      = Color3.fromRGB(255, 255, 255),
+        use_display= false,  -- false = Name, true = DisplayName
+    },
+ 
+    health = {
+        bar        = true,
+        based_color= true,
+        text       = false,
+        color      = Color3.fromRGB(0, 220, 80),
+        position   = "Left",  -- "Left" | "Right" | "Above Name" | "Below Name"
+    },
+ 
+    skeleton = {
+        enabled    = true,
+        color      = Color3.fromRGB(255, 255, 255),
+        thickness  = 1,
+    },
+ 
+    head_dot = {
+        enabled    = true,
+        color      = Color3.fromRGB(255, 255, 255),
+        radius     = 4,
+    },
+ 
+    tracer = {
+        enabled    = false,
+        color      = Color3.fromRGB(255, 255, 255),
+        origin     = "Bottom",  -- "Bottom" | "Top" | "Mouse"
+        thickness  = 1,
+    },
+ 
+    crosshair = {
+        enabled    = false,
+        color      = Color3.fromRGB(255, 255, 255),
+        dot        = true,
+        size       = 10,
+        gap        = 4,
+        thickness  = 1,
+    },
+ 
+    oof_arrow = {
+        enabled    = false,
+        color      = Color3.fromRGB(255, 255, 255),
+        radius     = 200,
+        size       = 12,
+    },
+ 
+    radar = {
+        enabled    = false,
+        range      = 250,
+        size       = 160,
+    },
+ 
+    distance_text  = false,
+    item_text      = false,
+    flags = {
+        moving     = false,
+        jumping    = false,
+        sitting    = false,
+    },
+}
+ 
+-- ─── UTIL ─────────────────────────────────────────────────────────────────────
+local function w2s(pos)
+    local v, on = Camera:WorldToViewportPoint(pos)
+    return Vector2.new(v.X, v.Y), on, v.Z
+end
+ 
+local function is_alive(p)
+    local c = p.Character
+    if not c then return false end
+    local h = c:FindFirstChildOfClass("Humanoid")
+    return h and h.Health > 0
+end
+ 
+local function same_team(p)
+    return cfg.team_check and p.Team ~= nil and p.Team == LocalPlayer.Team
+end
+ 
+local function is_visible(pos)
+    local origin = Camera.CFrame.Position
+    local hit = Workspace:FindPartOnRayWithIgnoreList(
+        Ray.new(origin, pos - origin), { LocalPlayer.Character })
+    if not hit then return true end
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl ~= LocalPlayer and pl.Character and hit:IsDescendantOf(pl.Character) then
+            return true
+        end
+    end
+    return false
+end
+ 
+local function new_draw(kind, props)
+    local d = Drawing.new(kind)
+    for k, v in pairs(props) do d[k] = v end
+    return d
+end
+ 
+-- ─── ESP OBJECTS ──────────────────────────────────────────────────────────────
+local objs = {}
+ 
+local BONES = {
+    {"Head","UpperTorso"},{"UpperTorso","LowerTorso"},
+    {"LowerTorso","LeftUpperLeg"},{"LeftUpperLeg","LeftLowerLeg"},{"LeftLowerLeg","LeftFoot"},
+    {"LowerTorso","RightUpperLeg"},{"RightUpperLeg","RightLowerLeg"},{"RightLowerLeg","RightFoot"},
+    {"UpperTorso","LeftUpperArm"},{"LeftUpperArm","LeftLowerArm"},{"LeftLowerArm","LeftHand"},
+    {"UpperTorso","RightUpperArm"},{"RightUpperArm","RightLowerArm"},{"RightLowerArm","RightHand"},
+}
+ 
+local function make_objs(player)
+    local t = {
+        box      = new_draw("Square", {Visible=false,Filled=false,Thickness=1}),
+        box_fill = new_draw("Square", {Visible=false,Filled=true}),
+        name     = new_draw("Text",   {Visible=false,Center=true,Outline=true,Size=13,Font=2}),
+        hp_bg    = new_draw("Line",   {Visible=false,Thickness=3,Color=Color3.fromRGB(0,0,0)}),
+        hp_bar   = new_draw("Line",   {Visible=false,Thickness=3}),
+        hp_text  = new_draw("Text",   {Visible=false,Center=true,Outline=true,Size=11,Font=2}),
+        head_dot = new_draw("Circle", {Visible=false,Filled=true}),
+        tracer   = new_draw("Line",   {Visible=false,Thickness=1}),
+        dist_txt = new_draw("Text",   {Visible=false,Center=true,Outline=true,Size=11,Font=2}),
+        skeleton = {},
+        corners  = {},
+        oof      = new_draw("Triangle",{Visible=false,Filled=true,Thickness=1}),
+    }
+    for i = 1, #BONES do
+        t.skeleton[i] = new_draw("Line", {Visible=false,Thickness=1})
+    end
+    -- 8 corner lines (4 corners × 2 lines each)
+    for i = 1, 8 do
+        t.corners[i] = new_draw("Line", {Visible=false,Thickness=2})
+    end
+    objs[player] = t
+end
+ 
+local function remove_objs(player)
+    if not objs[player] then return end
+    local function rem(d) if d and d.Remove then d:Remove() end end
+    local t = objs[player]
+    rem(t.box); rem(t.box_fill); rem(t.name)
+    rem(t.hp_bg); rem(t.hp_bar); rem(t.hp_text)
+    rem(t.head_dot); rem(t.tracer); rem(t.dist_txt); rem(t.oof)
+    for _, l in ipairs(t.skeleton) do rem(l) end
+    for _, l in ipairs(t.corners)  do rem(l) end
+    objs[player] = nil
+end
+ 
+local function hide_all(t)
+    t.box.Visible      = false
+    t.box_fill.Visible = false
+    t.name.Visible     = false
+    t.hp_bg.Visible    = false
+    t.hp_bar.Visible   = false
+    t.hp_text.Visible  = false
+    t.head_dot.Visible = false
+    t.tracer.Visible   = false
+    t.dist_txt.Visible = false
+    for _, l in ipairs(t.skeleton) do l.Visible = false end
+    for _, l in ipairs(t.corners)  do l.Visible = false end
+end
+ 
+-- ─── CORNER BOX HELPER ────────────────────────────────────────────────────────
+local function draw_corners(lines, x, y, w, h, color, len_ratio)
+    local lx = math.floor(w * (len_ratio or 0.25))
+    local ly = math.floor(h * (len_ratio or 0.25))
+    local pts = {
+        -- top-left H, top-left V
+        {Vector2.new(x,y),         Vector2.new(x+lx,y)},
+        {Vector2.new(x,y),         Vector2.new(x,y+ly)},
+        -- top-right H, top-right V
+        {Vector2.new(x+w,y),       Vector2.new(x+w-lx,y)},
+        {Vector2.new(x+w,y),       Vector2.new(x+w,y+ly)},
+        -- bot-left H, bot-left V
+        {Vector2.new(x,y+h),       Vector2.new(x+lx,y+h)},
+        {Vector2.new(x,y+h),       Vector2.new(x,y+h-ly)},
+        -- bot-right H, bot-right V
+        {Vector2.new(x+w,y+h),     Vector2.new(x+w-lx,y+h)},
+        {Vector2.new(x+w,y+h),     Vector2.new(x+w,y+h-ly)},
+    }
+    for i, pair in ipairs(pts) do
+        lines[i].From    = pair[1]
+        lines[i].To      = pair[2]
+        lines[i].Color   = color
+        lines[i].Visible = true
+    end
+end
+ 
+-- ─── MAIN ESP UPDATE ──────────────────────────────────────────────────────────
+local function update(player)
+    if not objs[player] then make_objs(player) end
+    local t = objs[player]
+ 
+    if not cfg.enabled then hide_all(t); t.oof.Visible = false; return end
+    if player == LocalPlayer and not cfg.self_esp then hide_all(t); t.oof.Visible = false; return end
+    if not is_alive(player) then hide_all(t); t.oof.Visible = false; return end
+    if same_team(player) then hide_all(t); t.oof.Visible = false; return end
+ 
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local head = char and char:FindFirstChild("Head")
+    local hum  = char and char:FindFirstChildOfClass("Humanoid")
+    if not root or not head or not hum then hide_all(t); t.oof.Visible = false; return end
+ 
+    local local_root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local world_dist = local_root and (root.Position - local_root.Position).Magnitude or 0
+    if world_dist > cfg.distance then hide_all(t); t.oof.Visible = false; return end
+ 
+    -- ESP color
+    local esp_col = cfg.visible_check and (is_visible(root.Position) and cfg.visible_color or cfg.hidden_color)
+                    or cfg.visible_color
+    if cfg.team_color and player.Team then
+        local tc = player.TeamColor
+        esp_col = Color3.fromRGB(tc.r*255, tc.g*255, tc.b*255)
+    end
+ 
+    -- Bounding box screen coords
+    local head_top = head.Position + Vector3.new(0, head.Size.Y/2 + 0.15, 0)
+    local root_bot = root.Position - Vector3.new(0, 2.8, 0)
+    local hs, h_on         = w2s(head_top)
+    local rs, r_on, depth  = w2s(root_bot)
+ 
+    -- OOF ARROW (off screen)
+    if not (h_on and r_on and depth > 0) then
+        hide_all(t)
+        if cfg.oof_arrow.enabled then
+            local vp     = Camera.ViewportSize
+            local center = Vector2.new(vp.X/2, vp.Y/2)
+            local camCF  = Camera.CFrame
+            local dir    = (root.Position - camCF.Position)
+            local flat   = Vector3.new(dir.X, 0, dir.Z)
+            if flat.Magnitude > 0 then flat = flat.Unit end
+            local angle  = math.atan2(flat:Dot(camCF.RightVector), flat:Dot(camCF.LookVector))
+            local r2     = cfg.oof_arrow.radius
+            local sz     = cfg.oof_arrow.size
+            t.oof.PointA = center + Vector2.new(math.sin(angle), -math.cos(angle)) * r2
+            t.oof.PointB = center + Vector2.new(math.sin(angle+0.4), -math.cos(angle+0.4)) * (r2-sz)
+            t.oof.PointC = center + Vector2.new(math.sin(angle-0.4), -math.cos(angle-0.4)) * (r2-sz)
+            t.oof.Color  = cfg.oof_arrow.color
+            t.oof.Visible= true
+        else
+            t.oof.Visible = false
+        end
+        return
+    end
+    t.oof.Visible = false
+ 
+    local bh   = math.abs(hs.Y - rs.Y)
+    local bw   = bh * 0.6
+    local bx   = rs.X - bw / 2
+    local by   = hs.Y
+ 
+    -- BOX
+    if cfg.box.enabled then
+        if cfg.box.style == "Corner" then
+            t.box.Visible      = false
+            t.box_fill.Visible = false
+            draw_corners(t.corners, bx, by, bw, bh, cfg.box.color)
+        else
+            for _, l in ipairs(t.corners) do l.Visible = false end
+            t.box.Visible      = true
+            t.box.Position     = Vector2.new(bx, by)
+            t.box.Size         = Vector2.new(bw, bh)
+            t.box.Color        = cfg.box.color
+            t.box.Thickness    = cfg.outline and 2 or 1
+ 
+            t.box_fill.Visible      = cfg.box.filled
+            t.box_fill.Position     = Vector2.new(bx, by)
+            t.box_fill.Size         = Vector2.new(bw, bh)
+            t.box_fill.Color        = cfg.box.fill_color
+            t.box_fill.Transparency = 1 - cfg.box.fill_alpha
+        end
+    else
+        t.box.Visible = false; t.box_fill.Visible = false
+        for _, l in ipairs(t.corners) do l.Visible = false end
+    end
+ 
+    -- NAME
+    if cfg.name.enabled then
+        local lbl = cfg.name.use_display and player.DisplayName or player.Name
+        t.name.Text     = lbl
+        t.name.Position = Vector2.new(rs.X, rs.Y + 2)
+        t.name.Color    = cfg.name.color
+        t.name.Visible  = true
+    else t.name.Visible = false end
+ 
+    -- HEALTH BAR
+    if cfg.health.bar then
+        local pct  = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+        local bx2  = (cfg.health.position == "Left") and (bx - 6) or (bx + bw + 3)
+        local from = Vector2.new(bx2, by)
+        local to   = Vector2.new(bx2, by + bh)
+        local fill_from = Vector2.new(bx2, by + bh * (1 - pct))
+        local hp_col = cfg.health.based_color
+            and Color3.fromRGB(255*(1-pct), 220*pct, 0)
+            or cfg.health.color
+        t.hp_bg.From = from; t.hp_bg.To = to; t.hp_bg.Visible = true
+        t.hp_bar.From = fill_from; t.hp_bar.To = to
+        t.hp_bar.Color = hp_col; t.hp_bar.Visible = true
+        if cfg.health.text then
+            t.hp_text.Text = math.floor(hum.Health)
+            t.hp_text.Position = Vector2.new(bx2, by - 13)
+            t.hp_text.Color = hp_col
+            t.hp_text.Visible = true
+        else t.hp_text.Visible = false end
+    else
+        t.hp_bg.Visible = false; t.hp_bar.Visible = false; t.hp_text.Visible = false
+    end
+ 
+    -- SKELETON
+    if cfg.skeleton.enabled then
+        for i, pair in ipairs(BONES) do
+            local p1 = char:FindFirstChild(pair[1])
+            local p2 = char:FindFirstChild(pair[2])
+            local line = t.skeleton[i]
+            if p1 and p2 then
+                local s1, on1 = w2s(p1.Position)
+                local s2, on2 = w2s(p2.Position)
+                line.From = s1; line.To = s2
+                line.Color = cfg.skeleton.color
+                line.Thickness = cfg.skeleton.thickness
+                line.Visible = on1 and on2
+            else line.Visible = false end
+        end
+    else for _, l in ipairs(t.skeleton) do l.Visible = false end end
+ 
+    -- HEAD DOT
+    if cfg.head_dot.enabled then
+        local hs2, hon = w2s(head.Position)
+        t.head_dot.Position = hs2
+        t.head_dot.Radius   = cfg.head_dot.radius
+        t.head_dot.Color    = cfg.head_dot.color
+        t.head_dot.Visible  = hon
+    else t.head_dot.Visible = false end
+ 
+    -- TRACER
+    if cfg.tracer.enabled then
+        local vp = Camera.ViewportSize
+        local from
+        if cfg.tracer.origin == "Bottom" then from = Vector2.new(vp.X/2, vp.Y)
+        elseif cfg.tracer.origin == "Top"then from = Vector2.new(vp.X/2, 0)
+        else from = Vector2.new(game:GetService("UserInputService"):GetMouseLocation().X,
+                                game:GetService("UserInputService"):GetMouseLocation().Y) end
+        t.tracer.From = from; t.tracer.To = rs
+        t.tracer.Color = cfg.tracer.color
+        t.tracer.Thickness = cfg.tracer.thickness
+        t.tracer.Visible = true
+    else t.tracer.Visible = false end
+ 
+    -- DISTANCE TEXT
+    if cfg.distance_text then
+        t.dist_txt.Text     = string.format("%.0f", world_dist)
+        t.dist_txt.Position = Vector2.new(rs.X, by - 22)
+        t.dist_txt.Color    = Color3.fromRGB(180,180,180)
+        t.dist_txt.Visible  = true
+    else t.dist_txt.Visible = false end
+end
+ 
+-- ─── CROSSHAIR ────────────────────────────────────────────────────────────────
+local chl = {}
+for i = 1, 4 do chl[i] = Drawing.new("Line") end
+local chd = Drawing.new("Circle")
+ 
+RunService.RenderStepped:Connect(function()
+    local vp = Camera.ViewportSize
+    local cx, cy = vp.X/2, vp.Y/2
+    local s, g, th = cfg.crosshair.size, cfg.crosshair.gap, cfg.crosshair.thickness
+    local c, show = cfg.crosshair.color, cfg.crosshair.enabled
+    chl[1].From=Vector2.new(cx,cy-g);     chl[1].To=Vector2.new(cx,cy-g-s)
+    chl[2].From=Vector2.new(cx,cy+g);     chl[2].To=Vector2.new(cx,cy+g+s)
+    chl[3].From=Vector2.new(cx-g,cy);     chl[3].To=Vector2.new(cx-g-s,cy)
+    chl[4].From=Vector2.new(cx+g,cy);     chl[4].To=Vector2.new(cx+g+s,cy)
+    for _, l in ipairs(chl) do l.Color=c; l.Thickness=th; l.Visible=show end
+    chd.Position=Vector2.new(cx,cy); chd.Radius=2; chd.Color=c
+    chd.Thickness=th; chd.Visible=show and cfg.crosshair.dot
+end)
+ 
+-- ─── RADAR ────────────────────────────────────────────────────────────────────
+local rbg = Drawing.new("Square"); rbg.Filled=true; rbg.Color=Color3.fromRGB(18,18,18); rbg.Transparency=0.4
+local rself = Drawing.new("Circle"); rself.Filled=true; rself.Color=Color3.fromRGB(0,200,100); rself.Radius=4
+local rdots = {}
+ 
+RunService.RenderStepped:Connect(function()
+    local show = cfg.radar.enabled
+    local sz   = cfg.radar.size
+    local vp   = Camera.ViewportSize
+    local ox, oy = vp.X - sz - 10, 10
+    rbg.Visible=show; rbg.Position=Vector2.new(ox,oy); rbg.Size=Vector2.new(sz,sz)
+    rself.Visible=show; rself.Position=Vector2.new(ox+sz/2,oy+sz/2)
+    local lroot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local idx=1
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl==LocalPlayer or not is_alive(pl) then continue end
+        local root = pl.Character and pl.Character:FindFirstChild("HumanoidRootPart")
+        if not root then continue end
+        if not rdots[idx] then
+            rdots[idx]=Drawing.new("Circle"); rdots[idx].Filled=true; rdots[idx].Radius=3
+        end
+        local dot = rdots[idx]; idx=idx+1
+        if show and lroot then
+            local camCF = Camera.CFrame
+            local diff  = root.Position - lroot.Position
+            local scale = (sz/2)/cfg.radar.range
+            local rx2   = diff:Dot(camCF.RightVector)*scale
+            local rz    = diff:Dot(camCF.LookVector)*scale
+            dot.Position= Vector2.new(math.clamp(ox+sz/2+rx2,ox,ox+sz), math.clamp(oy+sz/2-rz,oy,oy+sz))
+            dot.Color   = same_team(pl) and Color3.fromRGB(0,200,100) or Color3.fromRGB(220,60,60)
+            dot.Visible = true
+        else dot.Visible=false end
+    end
+    for i=idx,#rdots do rdots[i].Visible=false end
+end)
+ 
+-- ─── LOOP ─────────────────────────────────────────────────────────────────────
+RunService.RenderStepped:Connect(function()
+    for _, pl in ipairs(Players:GetPlayers()) do update(pl) end
+end)
+Players.PlayerRemoving:Connect(remove_objs)
+ 
+print("[ESP] loaded")
+return cfg
